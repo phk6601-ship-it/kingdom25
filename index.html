@@ -162,6 +162,15 @@ body:not(.tv) #moon{display:none}
 .thinking i{width:.45em;height:.45em;border-radius:50%;background:var(--gold);animation:dot 1.2s infinite}
 .thinking i:nth-child(2){animation-delay:.2s}.thinking i:nth-child(3){animation-delay:.4s}
 @keyframes dot{0%,80%,100%{opacity:.2;transform:translateY(0)}40%{opacity:1;transform:translateY(-.25em)}}
+.turnclock{margin-top:.9em;font-family:var(--num);color:var(--cream);display:flex;align-items:baseline;justify-content:center;gap:.2em}
+.turnclock b{font-size:2.6em;font-weight:800;line-height:1}
+.turnclock small{font-family:var(--body);color:var(--mist);font-size:.9em}
+.turnclock.small{margin:0 0 6px}.turnclock.small b{font-size:34px}.turnclock.small small{font-size:15px}
+.turnclock.low b{color:var(--red2);animation:flick .5s infinite}
+.turnbar{height:.5em;margin-top:.5em;border-radius:99px;background:rgba(233,214,176,.1);overflow:hidden}
+.turnbar i{display:block;height:100%;width:100%;border-radius:inherit;background:linear-gradient(90deg,var(--gold),var(--gold2));transition:width .2s linear}
+.turnbar.low i{background:linear-gradient(90deg,var(--red),var(--red2))}
+.myturn .turnbar{height:8px;margin:0 0 12px}
 .pips{display:flex;gap:.35em;flex-wrap:wrap}
 .pips i{width:1.1em;height:1.1em;border-radius:3px;background:rgba(233,214,176,.08);box-shadow:inset 0 0 0 1px var(--line2)}
 .pips i.on{background:var(--gold);box-shadow:none}
@@ -460,19 +469,28 @@ const Rules = (() => {
   const list = s => Object.values(s.players).sort((a, b) => a.seat - b.seat);
   function settings(s) {
     const a = auto(list(s).length || 25);
-    return { traitors: s.custom.traitors ?? a.traitors, every: s.custom.every ?? a.every, jail: s.custom.jail ?? a.jail };
+    return { traitors: s.custom.traitors ?? a.traitors, every: s.custom.every ?? a.every, jail: s.custom.jail ?? a.jail, turnSec: s.custom.turnSec ?? 30 };
   }
   const nextTurn = s => list(s).find(p => !p.played && !p.jailed)?.seat ?? null;
   const waiting = s => list(s).filter(p => !p.played && !p.jailed);
   function candidates(s) {
     return s.phase === 'final' ? list(s).map(p => p.seat) : waiting(s).map(p => p.seat);
   }
+  // 다음 사람에게 차례를 넘기고 제한 시간 시작
+  function giveTurn(s) { s.turn = nextTurn(s); const t = settings(s).turnSec; s.turnEnd = s.turn !== null && t ? Date.now() + t * 1000 : null; }
+  function register(s, p, col, str, auto) {
+    const entry = { v: Number(str), seat: p.seat, col, minA: minValid(p.cards, last(s.cols.A)), minB: minValid(p.cards, last(s.cols.B)), prev: last(s.cols[col]) };
+    if (auto) entry.auto = true;
+    s.cols[col].push(entry); p.played = true; s.moves++;
+    log(s, auto ? `${p.seat}번 ${p.name} 시간 초과 → ${col}열 ${entry.v} 자동 등록` : `${p.seat}번 ${p.name} → ${col}열 ${entry.v}`);
+    afterTurn(s, entry);
+  }
   function log(s, text) { s.log.push({ t: Date.now(), text }); if (s.log.length > 60) s.log.shift(); }
 
   function startVote(s, final) {
-    s.phase = final ? 'final' : 'vote'; s.ballots = {}; s.voteNo++; s.tallyOpen = false; s.pick = []; s.revealed = 0; s.turn = null; s.timerEnd = null;
+    s.phase = final ? 'final' : 'vote'; s.turnEnd = null; s.ballots = {}; s.voteNo++; s.tallyOpen = false; s.pick = []; s.revealed = 0; s.turn = null; s.timerEnd = null;
   }
-  function finish(s, winner, reason) { s.phase = 'ended'; s.winner = winner; s.reason = reason; s.turn = null; s.timerEnd = null; log(s, reason); }
+  function finish(s, winner, reason) { s.turnEnd = null; s.phase = 'ended'; s.winner = winner; s.reason = reason; s.turn = null; s.timerEnd = null; log(s, reason); }
 
   function afterTurn(s, entry) {
     if (entry && entry.v > LIMIT) {
@@ -482,7 +500,7 @@ const Rules = (() => {
     const st = settings(s);
     if (nextTurn(s) === null) return finish(s, 'loyal', '모두 등록할 때까지 두 열 모두 999를 넘지 않았습니다');
     if (s.moves % st.every === 0 && waiting(s).length > st.jail) { log(s, `${s.moves}명 등록 — 감옥 재판을 엽니다`); startVote(s, false); return; }
-    s.turn = nextTurn(s);
+    giveTurn(s);
   }
 
   function tally(s) {
@@ -529,6 +547,7 @@ const Rules = (() => {
         return { ok: true }; }
       case 'config': { hostOnly(); if (s.phase !== 'lobby') fail('대기실에서만');
         for (const k of ['traitors', 'every', 'jail']) if (a[k] !== undefined) s.custom[k] = a[k] === null ? undefined : Math.max(1, Math.min(15, Number(a[k])));
+        if (a.turnSec !== undefined) s.custom.turnSec = a.turnSec === null ? undefined : Math.max(0, Math.min(120, Number(a.turnSec)));
         return { ok: true }; }
       case 'start': { hostOnly();
         const ps = list(s); if (s.phase !== 'lobby') fail('이미 시작했어요'); if (ps.length < 4) fail('4명 이상 들어와야 시작할 수 있어요');
@@ -540,7 +559,7 @@ const Rules = (() => {
         log(s, `${ps.length}명 중 역적 ${st.traitors}명이 숨어들었습니다`);
         return { ok: true }; }
       case 'seen': { if (!me) fail('참여 정보가 없어요'); me.seen = true; return { ok: true }; }
-      case 'begin': { hostOnly(); if (s.phase !== 'reveal') fail('지금은 안 돼요'); s.phase = 'play'; s.turn = nextTurn(s); log(s, '숫자 등록이 시작되었습니다'); return { ok: true }; }
+      case 'begin': { hostOnly(); if (s.phase !== 'reveal') fail('지금은 안 돼요'); s.phase = 'play'; giveTurn(s); log(s, '숫자 등록이 시작되었습니다'); return { ok: true }; }
       case 'move': {
         if (s.phase !== 'play') fail('지금은 등록 시간이 아니에요');
         const p = host && a.seat ? s.players[a.seat] : me;
@@ -548,10 +567,14 @@ const Rules = (() => {
         const col = a.col; if (col !== 'A' && col !== 'B') fail('A열이나 B열을 고르세요');
         const str = String(a.value || '');
         const err = check(p.cards, str, last(s.cols[col])); if (err) fail(err);
-        const entry = { v: Number(str), seat: p.seat, col, minA: minValid(p.cards, last(s.cols.A)), minB: minValid(p.cards, last(s.cols.B)), prev: last(s.cols[col]) };
-        s.cols[col].push(entry); p.played = true; s.moves++;
-        log(s, `${p.seat}번 ${p.name} → ${col}열 ${entry.v}`);
-        afterTurn(s, entry); return { ok: true };
+        register(s, p, col, str, false); return { ok: true };
+      }
+      case 'timeout': { hostOnly();
+        if (s.phase !== 'play' || !s.turnEnd || Date.now() < s.turnEnd) fail('아직 시간이 남았어요');
+        const p = s.players[s.turn], A = minValid(p.cards, last(s.cols.A)), B = minValid(p.cards, last(s.cols.B));
+        if (A === null && B === null) { p.played = true; s.moves++; log(s, `${p.seat}번 ${p.name} 시간 초과 — 낼 수 있는 숫자가 없어 넘어갑니다`); afterTurn(s, null); return { ok: true }; }
+        const col = B === null || (A !== null && A <= B) ? 'A' : 'B';
+        register(s, p, col, String(col === 'A' ? A : B), true); return { ok: true };
       }
       case 'pass': {
         if (s.phase !== 'play') fail('지금은 안 돼요');
@@ -582,7 +605,7 @@ const Rules = (() => {
         if (s.phase === 'vote') {
           s.pick.forEach(n => s.players[n].jailed = true);
           log(s, `${s.pick.join(', ')}번이 감옥에 갇혔습니다`);
-          s.phase = 'play'; s.tallyOpen = false; s.turn = nextTurn(s);
+          s.phase = 'play'; s.tallyOpen = false; giveTurn(s);
           if (s.turn === null) finish(s, 'loyal', '두 열 모두 999를 넘지 않았습니다');
           return { ok: true };
         }
@@ -618,7 +641,7 @@ const Rules = (() => {
       cols: s.cols, moves: s.moves, turn: s.turn, voteNo: s.voteNo, candidates: ['vote', 'final'].includes(s.phase) ? candidates(s) : [],
       voted: Object.keys(s.ballots).length, tallyOpen: s.tallyOpen, tally: s.tallyOpen || ended ? tally(s) : null,
       pick: s.pick, revealed: s.revealed, winner: ['verdict', 'ended'].includes(s.phase) ? s.winner : null, reason: s.reason, hits: s.hits,
-      timerEnd: s.timerEnd, log: s.log.slice(-12), rejoin: Object.entries(s.rejoin).map(([seat, r]) => ({ seat: Number(seat), name: r.name })),
+      timerEnd: s.timerEnd, turnEnd: s.phase === 'play' ? s.turnEnd || null : null, now: Date.now(), log: s.log.slice(-12), rejoin: Object.entries(s.rejoin).map(([seat, r]) => ({ seat: Number(seat), name: r.name })),
       left: waiting(s).length, untilVote: s.phase === 'play' ? st.every - (s.moves % st.every) : null,
     };
   }
@@ -951,6 +974,7 @@ function onPriv(pv) {
 /* ---------------- 상태 변화 → 연출 ---------------- */
 function setPub(pub) {
   const prev = S.pub; S.pub = pub;
+  if (pub?.now && !IS_HOST) S.offset = pub.now - Date.now();
   if (pub && prev) (IS_HOST ? hostFx : playerFx)(prev, pub);
   if (pub && (!prev || prev.round !== pub.round) && !S.seenInit) { markTilesSeen(pub); S.seenInit = true; }
   render();
@@ -985,6 +1009,10 @@ function playerFx(a, b) {
   if (me && b.phase === 'play' && b.turn === me && (a.turn !== me || a.phase !== 'play')) {
     navigator.vibrate?.([90, 70, 90, 70, 160]); Snd.pluck(440, .3); Snd.pluck(659.3, .3, .15);
     cine('', '나의 차례!', '친구들이 못 보게 화면을 가리고 숫자를 만드세요', '', 2000);
+  }
+  if (me && a.phase === 'play' && a.turn === me && b.turn !== me) {
+    closeModal(); S.compose = [];
+    const e = entryOf(b, me); if (e?.auto) { toast(`시간이 지나서 가장 작은 수 ${e.v}이(가) ${e.col}열에 자동 등록됐어요`); navigator.vibrate?.(200); }
   }
   if (a.phase !== b.phase) {
     if (b.phase === 'vote') { navigator.vibrate?.(120); cine('監 獄 裁 判', '감옥 재판', `수상한 ${b.settings.jail}명을 골라 밀서를 내세요`, '', 2200); }
@@ -1030,6 +1058,8 @@ function tagHTML(p, pl, extra = '') {
 }
 function cardHTML(d, i, attrs = '', cls = '') { return `<button class="card ${cls}" style="--r:${(i - 1.5) * 2.2}deg" ${attrs}><i>${HANJA[d]}</i><b>${d}</b><i>${HANJA[d]}</i></button>`; }
 function soundBtn() { return `<button class="${IS_HOST ? 'chip' : 'iconbtn'}" data-act="sound" title="소리">${Snd.on ? IC.sound : IC.mute}${IS_HOST ? (Snd.on ? ' 소리 끄기' : ' 소리 켜기') : ''}</button>`; }
+const nowSync = () => Date.now() + (IS_HOST ? 0 : S.offset || 0);
+const turnLeft = p => p?.turnEnd ? Math.max(0, Math.ceil((p.turnEnd - nowSync()) / 1000)) : 0;
 function fmtTime(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
 function studentURL(code) { return location.origin + location.pathname + '?room=' + code; }
 function qrSVG(text) { try { const q = qrcode(0, 'M'); q.addData(text); q.make(); return q.createSvgTag({ cellSize: 6, margin: 1, scalable: true }); } catch { return ''; } }
@@ -1091,8 +1121,10 @@ function hostLobby(p) {
     <div style="display:flex;flex-direction:column;gap:1.2em">
       <div class="panel"><h3>입궐한 신하 <b style="color:var(--gold2);font-family:var(--num);font-size:1.4em">${n}</b>명</h3><div class="seats">${seats}</div></div>
       <div class="panel"><h3>왕국 설정 <span class="mute" style="font-size:.8em">(인원에 맞춰 자동 · 바꿀 수 있어요)</span></h3>
-        <div class="settings">${step('traitors', '역적', st.traitors)}${step('every', '감옥 재판 간격', st.every)}${step('jail', '감옥·재판 인원', st.jail)}<button class="chip" data-act="cfgAuto">자동</button></div>
-        <p class="mute" style="margin:.9em 0 0;font-size:.9em;line-height:1.6">${n || 25}명 중 역적 ${st.traitors}명 · ${st.every}명 등록할 때마다 ${st.jail}명 감옥 · 마지막 재판은 ${st.jail}명 중 역적 ${Math.floor(st.jail / 2) + 1}명 이상이면 충신 승리</p></div>
+        <div class="settings">${step('traitors', '역적', st.traitors)}${step('every', '감옥 재판 간격', st.every)}${step('jail', '감옥·재판 인원', st.jail)}
+          <div class="stepper"><span class="mute">차례 시간</span><button data-act="cfg" data-k="turnSec" data-d="-10">−</button><b style="min-width:2.6em">${st.turnSec ? st.turnSec + '초' : '끄기'}</b><button data-act="cfg" data-k="turnSec" data-d="10">+</button></div>
+          <button class="chip" data-act="cfgAuto">자동</button></div>
+        <p class="mute" style="margin:.9em 0 0;font-size:.9em;line-height:1.6">${n || 25}명 중 역적 ${st.traitors}명 · ${st.every}명 등록할 때마다 ${st.jail}명 감옥 · 마지막 재판은 ${st.jail}명 중 역적 ${Math.floor(st.jail / 2) + 1}명 이상이면 충신 승리${st.turnSec ? ` · 한 사람당 ${st.turnSec}초 (넘기면 가장 작은 수 자동 등록)` : ''}</p></div>
       <div style="display:flex;gap:1em;align-items:center;flex-wrap:wrap">
         <button class="btn big" data-act="start" ${n < 4 ? 'disabled' : ''}>어명을 내린다 · 게임 시작</button>
         <button class="chip" data-act="bots">빈자리를 컴퓨터로 채우기 (연습용)</button>
@@ -1114,7 +1146,8 @@ function hostPlay(p) {
     <aside class="side">
       <div class="panel spot"><h3 style="justify-content:center">지금 차례</h3>
         <div class="bign">${cur ? cur.seat : '-'}<small>번</small></div><div class="who">${esc(cur?.name || '')}</div>
-        <div class="thinking">숫자를 고르는 중<i></i><i></i><i></i></div></div>
+        <div class="thinking">숫자를 고르는 중<i></i><i></i><i></i></div>
+        ${p.turnEnd ? `<div class="turnclock"><b data-turnleft>${Math.max(0, Math.ceil((p.turnEnd - Date.now()) / 1000))}</b><small>초</small></div><div class="turnbar"><i data-turnbar></i></div>` : ''}</div>
       <div class="panel"><h3>감옥 재판까지 <b style="color:var(--gold2)">${p.untilVote}명</b></h3><div class="pips">${Array.from({ length: st.every }, (_, i) => `<i class="${i < done ? 'on' : ''}"></i>`).join('')}</div>
         <p class="mute" style="margin:.7em 0 0;font-size:.85em">남은 사람 ${p.left}명 · 감옥 ${p.players.filter(x => x.jailed).length}명</p></div>
       <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0"><h3>왕국 일지</h3><div class="logs">${p.log.slice(-8).map(l => `<div>${esc(l.text)}</div>`).join('')}</div></div>
@@ -1170,7 +1203,7 @@ function reviewHTML(p) {
     if (e) {
       const best = Math.min(e.minA ?? Infinity, e.minB ?? Infinity);
       what = `${e.col}열에 <b style="color:var(--cream)">${e.v}</b>`;
-      badge = e.v === best ? '<span class="badge ok">가장 작은 수</span>' : best > 999 ? '<span class="badge gray">어쩔 수 없었음</span>' : `<span class="badge up">최소 ${best} · +${e.v - best}</span>`;
+      badge = e.auto ? '<span class="badge gray">시간 초과·자동</span>' : e.v === best ? '<span class="badge ok">가장 작은 수</span>' : best > 999 ? '<span class="badge gray">어쩔 수 없었음</span>' : `<span class="badge up">최소 ${best} · +${e.v - best}</span>`;
     } else what = pl.jailed ? '감옥에 갇힘' : pl.played ? '건너뜀' : '등록 안 함';
     return `<div class="rv ${pl.role}"><span class="seal ${pl.role === 'loyal' ? 'jade' : ''}">${pl.role === 'traitor' ? '逆' : '忠'}</span>
       <div class="who"><b>${pl.seat}</b>${esc(pl.name)}</div><div class="what">${what}${badge}</div>
@@ -1218,7 +1251,7 @@ function composeHTML(p, pv) {
     return `<button class="colbtn ${built && !err ? 'ok' : 'no'}" data-act="colpick" data-col="${col}"><span class="l">${col}열에 등록</span>
       <span class="r">${!built ? `마지막 ${prev} → ${prev}보다 큰 수` : err ? '✗ ' + esc(err) : `${prev} → ${built} ✓`}</span></button>`;
   };
-  return `<div class="sheet myturn"><div class="brush">나의 차례!</div>
+  return `<div class="sheet myturn">${p.turnEnd ? `<div class="turnclock small"><b data-turnleft>${turnLeft(p)}</b><small>초 안에 내세요</small></div><div class="turnbar"><i data-turnbar></i></div>` : ''}<div class="brush">나의 차례!</div>
     <p class="mute" style="margin:4px 0 0;font-size:14px">카드를 눌러 숫자를 만들고, 넣을 열을 고르세요. 카드는 몇 장 써도 돼요.</p>
     <div class="slots">${slots}</div>
     <div class="hand big">${cards.map((d, i) => cardHTML(d, i, `data-act="card" data-i="${i}"`, 'tap ' + (S.compose.includes(i) ? 'used' : ''))).join('')}</div>
@@ -1271,7 +1304,7 @@ function renderPlayer() {
       const cur = p.players.find(x => x.seat === p.turn), e = entryOf(p, pv.seat);
       const st = me.jailed ? `<div class="jailbars"><div class="brush">감옥에 갇혔어요</div><p style="position:relative;z-index:1;margin:6px 0 0">숫자는 등록할 수 없지만 재판 투표는 할 수 있어요</p></div>`
         : e ? `<div class="status">${e.col}열에 <b>${e.v}</b>을(를) 등록했어요</div>`
-          : `<div class="status">지금 <b>${cur?.seat}번 ${esc(cur?.name)}</b> 차례 · 내 차례까지 <b>${pos}명</b></div>`;
+          : `<div class="status">지금 <b>${cur?.seat}번 ${esc(cur?.name)}</b> 차례${p.turnEnd ? ` (<span data-turnleft>${turnLeft(p)}</span>초)` : ''} · 내 차례까지 <b>${pos}명</b></div>`;
       body = `${miniBoard(p)}${st}${mission(pv, p)}<p class="hint">감옥 재판까지 ${p.untilVote}명</p>`;
     }
   } else if (p.phase === 'vote' || p.phase === 'final') {
@@ -1313,14 +1346,14 @@ function render() {
 
 /* ---------------- 게임 방법 ---------------- */
 function rulesSteps() {
-  const st = S.pub?.settings || { traitors: 5, every: 10, jail: 5 }, n = S.pub?.players?.length || 25, need = Math.floor(st.jail / 2) + 1;
+  const st = S.pub?.settings || { traitors: 5, every: 10, jail: 5, turnSec: 30 }, n = S.pub?.players?.length || 25, need = Math.floor(st.jail / 2) + 1;
   const T = (v, sub = '', cls = '') => `<div class="tile ${cls}"><b>${v}</b>${sub ? `<small>${sub}</small>` : ''}</div>`;
   const hand = ds => `<div class="hand">${ds.split('').map((d, i) => cardHTML(d, i, 'tabindex="-1"')).join('')}</div>`;
   const bub = (v, ok) => `<span class="bub ${ok ? 'yes' : 'no'}">${v}</span>`;
   return [
     { t: '왕국에 역적이 숨어들었다', x: `우리 반 ${n}명 중 <b>역적 ${st.traitors}명</b>이 몰래 섞여 있어요. 나머지는 모두 <b>충신</b>이에요.<br>내가 누구인지는 <b>내 태블릿의 밀지</b>로만 알 수 있어요. 절대 보여 주지 마세요!`,
       v: `<div class="vrow">${Array.from({ length: 10 }, (_, i) => `<span class="seal ${[2, 7].includes(i) ? '' : 'jade'}" style="font-size:1.1em;transform:rotate(${(i % 3 - 1) * 5}deg)">${[2, 7].includes(i) ? '逆' : '忠'}</span>`).join('')}</div><div class="mute" style="color:var(--pmute)">누가 역적일까?</div>` },
-    { t: '숫자 카드 4장', x: `모두 <b>숫자 카드 4장</b>을 받아요. 카드는 <b>나만</b> 볼 수 있어요.<br>번호 순서대로 한 명씩, 내 카드로 숫자를 만들어 등록해요. 카드는 1장~4장 몇 장을 써도 돼요.`,
+    { t: '숫자 카드 4장', x: `모두 <b>숫자 카드 4장</b>을 받아요. 카드는 <b>나만</b> 볼 수 있어요.<br>번호 순서대로 한 명씩, 내 카드로 숫자를 만들어 등록해요. 카드는 1장~4장 몇 장을 써도 돼요.${st.turnSec ? `<br>내 차례에는 <b>${st.turnSec}초 안에</b> 내야 해요. 시간이 지나면 <b>가장 작은 수</b>가 자동으로 등록돼요.` : ''}`,
       v: `${hand('1719')}<div class="vrow">${bub(9, 1)}${bub(17, 1)}${bub(71, 1)}${bub(179, 1)}${bub(1971, 1)}</div>` },
     { t: '규칙 ① 더 큰 수만', x: `숫자는 그 줄의 <b>마지막 숫자보다 커야</b> 해요.`,
       v: `<div class="vrow"><span class="lab">A열</span>${T(4)}${T(7)}${T(15)}</div>${hand('1719')}<div class="vrow">${bub(11, 0)}<span style="font-size:1.4em">→ 15보다 작아서 안 돼요</span></div><div class="vrow">${bub(17, 1)}<span style="font-size:1.4em">→ 좋아요!</span></div>` },
@@ -1368,7 +1401,7 @@ const ACT = {
   bots() { const max = Math.max(25, ...S.pub.players.map(x => x.seat)); hostDo({ type: 'bots', upto: max }); },
   kick(d) { hostDo({ type: 'kick', seat: Number(d.seat) }); },
   cfg(d) { const st = S.pub.settings; hostDo({ type: 'config', [d.k]: st[d.k] + Number(d.d) }); },
-  cfgAuto() { hostDo({ type: 'config', traitors: null, every: null, jail: null }); },
+  cfgAuto() { hostDo({ type: 'config', traitors: null, every: null, jail: null, turnSec: null }); },
   start() { hostDo({ type: 'start' }); },
   begin() { const p = S.pub, left = p.players.filter(x => !x.seen).length; if (left && !confirm(`아직 ${left}명이 밀지를 확인하지 않았어요. 시작할까요?`)) return; hostDo({ type: 'begin' }); },
   skip() { const p = S.pub; if (confirm(`${p.turn}번 차례를 건너뛸까요? (그 학생은 이번 판에 숫자를 내지 않아요)`)) hostDo({ type: 'pass' }); },
@@ -1420,6 +1453,23 @@ const peek = v => { S.peek = v; document.querySelectorAll('.mission').forEach(m 
 document.addEventListener('pointerdown', e => { if (e.target.closest('[data-hold]')) { peek(true); if (navigator.vibrate) navigator.vibrate(15); } });
 ['pointerup', 'pointercancel', 'blur'].forEach(t => addEventListener(t, () => S.peek && peek(false)));
 document.addEventListener('contextmenu', e => { if (e.target.closest('[data-hold]')) e.preventDefault(); });
+// 차례 시간
+setInterval(() => {
+  const p = S.pub; if (!p || p.phase !== 'play' || !p.turnEnd) return;
+  const total = (p.settings.turnSec || 30) * 1000, leftMs = Math.max(0, p.turnEnd - nowSync()), left = Math.ceil(leftMs / 1000);
+  document.querySelectorAll('[data-turnleft]').forEach(el => { el.textContent = left; el.closest('.turnclock')?.classList.toggle('low', left <= 10); });
+  document.querySelectorAll('[data-turnbar]').forEach(el => { el.style.width = (leftMs / total * 100) + '%'; el.parentElement.classList.toggle('low', left <= 10); });
+  const key = `${p.round}-${p.moves}-${left}`;
+  if (S.lastBeat !== key) {
+    S.lastBeat = key;
+    if (IS_HOST && left <= 5 && left > 0) Snd.pluck(left <= 3 ? 880 : 659.3, .12);
+    if (!IS_HOST && p.turn === S.priv?.seat && (left === 10 || left === 5)) navigator.vibrate?.(120);
+  }
+  if (IS_HOST && H.game?.phase === 'play' && H.game.turnEnd && Date.now() >= H.game.turnEnd + 700) {
+    const tk = `${H.game.round}-${H.game.moves}`;
+    if (H.timedOut !== tk) { H.timedOut = tk; Snd.drum(.6); hostDo({ type: 'timeout' }); }
+  }
+}, 200);
 // 타이머
 setInterval(() => {
   const p = S.pub; if (!p) return;
